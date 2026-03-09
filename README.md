@@ -56,7 +56,152 @@ program.md      — agent instructions
 pyproject.toml  — dependencies
 ```
 
-## Design choices
+## Architecture & Code Guide
+
+This section explains each component in the codebase in detail.
+
+### `prepare.py` — Data & Evaluation (read-only)
+
+| Component | Description |
+|-----------|-------------|
+| `download_data()` | Downloads parquet shards from HuggingFace in parallel with retries. The last shard (`shard_06542`) is always pinned as the validation shard. |
+| `train_tokenizer()` | Trains a BPE tokenizer (via `rustbpe`) on up to 1 B characters from training shards, then wraps it in a `tiktoken.Encoding` and pickles it. Also builds a `token_bytes` tensor mapping each token ID to its UTF-8 byte length, used for BPB evaluation. |
+| `Tokenizer` | Thin wrapper around the tiktoken encoding; exposes `encode()` and `decode()` and the BOS token ID. |
+| `make_dataloader()` | Yields `(inputs, targets, epoch)` batches. Uses *BOS-aligned best-fit bin packing*: each row starts with a BOS token and is filled greedily with the largest document that fits; when nothing fits the remaining space the shortest document is cropped. This gives 100% token utilization with no padding. |
+| `evaluate_bpb()` | **Fixed metric — do not modify.** Computes bits-per-byte: sums per-token cross-entropy (nats) and UTF-8 byte counts over `EVAL_TOKENS` validation tokens, then divides and converts nats→bits. Special tokens (byte length 0) are excluded. BPB is vocabulary-size independent, so experiments with different vocab sizes are directly comparable. |
+
+**Fixed constants** (changing these would break comparability across runs):
+
+```python
+MAX_SEQ_LEN  = 2048   # context window
+TIME_BUDGET  = 300    # 5-minute training budget (seconds)
+EVAL_TOKENS  = 40 * 524288  # validation evaluation size
+VOCAB_SIZE   = 8192
+```
+
+---
+
+### `train.py` — Model, Optimizer, Training Loop (agent-editable)
+
+#### GPT Model
+
+```
+Input tokens (B, T)
+  │
+  ▼
+wte: Embedding (vocab_size → n_embd)
+  │
+RMSNorm
+  │  ┌──────────────────────────────────┐
+  ▼  │  (x0 = initial embedding, saved) │
+  ┌──┴──────────────────────────────────▼──┐
+  │  x = resid_lambda[i] * x               │  ← per-layer learnable scale
+  │     + x0_lambda[i]  * x0               │  ← skip from embedding
+  │                                         │
+  │  CausalSelfAttention(norm(x), ...)      │
+  │  MLP(norm(x))                           │
+  └─────────────────────────────────────────┘
+  (repeated n_layer times)
+  │
+RMSNorm
+  │
+lm_head: Linear (n_embd → vocab_size)
+  │
+softcap: 15 * tanh(logits / 15)   ← prevents logit explosion
+  │
+cross-entropy loss / logits
+```
+
+**`GPTConfig`** — dataclass holding all model shape parameters:
+- `n_layer`: depth (primary knob for model size)
+- `n_embd`: hidden dimension (`= n_head * HEAD_DIM`)
+- `n_head` / `n_kv_head`: query / key-value heads (set equal for standard MHA)
+- `window_pattern`: string of `'L'` (full context) / `'S'` (half context) characters cycling across layers; last layer is always `'L'`
+
+**`CausalSelfAttention`** — multi-head attention with:
+- *Rotary Position Embeddings (RoPE)*: queries and keys are rotated by position-dependent angles, encoding relative distance in the dot product without explicit position IDs.
+- *QK-norm*: RMS-normalizing Q and K prevents attention logit magnitude from growing with depth.
+- *Sliding window*: `'S'` layers attend to only the nearest `T//2` tokens, reducing the quadratic cost while keeping global context in `'L'` layers.
+- *Value Embeddings* (alternating layers): a learned per-token residual `ve` (from a separate embedding table) is added to the value vectors, gated per-head by a small sigmoid gate. This lets shallow layers propagate token-identity information through the value channel, bypassing the Q–K selection bottleneck.
+
+**`MLP`** — feed-forward block with ReLU² (squared ReLU):
+- Hidden dim = 4 × model dim (standard).
+- `ReLU(x)²` produces sparser activations than GELU and is trivially differentiable.
+
+**`Block`** — pre-norm residual block: `x = x + Attn(norm(x))` then `x = x + MLP(norm(x))`.
+
+**`GPT.forward`**:
+1. Look up token embeddings, apply RMSNorm, save as `x0`.
+2. For each layer: blend `x` and `x0` with learned scalars, then run the Block.
+3. Final RMSNorm → linear projection → logit soft-cap.
+4. If targets provided: return mean cross-entropy loss; otherwise return logits.
+
+#### MuonAdamW Optimizer
+
+A combined optimizer with two update rules assigned by parameter type:
+
+| Parameter type | Optimizer | Why |
+|----------------|-----------|-----|
+| 2D weight matrices (attn, MLP) | **Muon** | Matrix-valued updates via Newton orthogonalization; well-suited to the large, structured parameter spaces of attention/MLP weights |
+| Embeddings, scalars, lm_head | **AdamW** | Standard adaptive optimizer for 1D/lookup parameters |
+
+**Muon step** (`muon_step_fused`):
+1. *Nesterov momentum*: lookahead gradient estimate.
+2. *Polar Express orthogonalization*: iteratively computes the polar factor of the gradient matrix (nearest orthogonal matrix) using a polynomial Newton iteration — a fast, compile-friendly alternative to SVD.
+3. *NorMuon variance reduction*: per-row/column adaptive scaling of the orthogonalized gradient, similar in spirit to Adam's second moment but applied after orthogonalization.
+4. *Cautious weight decay*: decay only applied where the gradient and parameter agree in sign (prevents decay from fighting the update direction).
+
+Learning rates are scaled by `1/√(model_dim/768)` so that the same nominal LR works across model sizes.
+
+#### Hyperparameters
+
+All hyperparameters are plain module-level constants — no CLI parsing needed:
+
+```python
+# Architecture
+ASPECT_RATIO  = 64       # model_dim = DEPTH * ASPECT_RATIO
+HEAD_DIM      = 128      # attention head dimension
+WINDOW_PATTERN = "SSSL"  # per-layer attention window pattern
+
+# Optimization
+TOTAL_BATCH_SIZE = 2**19  # ~524K tokens/step (gradient-accumulated)
+EMBEDDING_LR    = 0.6
+UNEMBEDDING_LR  = 0.004
+MATRIX_LR       = 0.04   # Muon LR for weight matrices
+SCALAR_LR       = 0.5
+WEIGHT_DECAY    = 0.2    # Muon cautious weight decay (decays to 0 by end)
+ADAM_BETAS      = (0.8, 0.95)
+WARMUP_RATIO    = 0.0    # fraction of TIME_BUDGET for LR warmup
+WARMDOWN_RATIO  = 0.5    # fraction of TIME_BUDGET for LR warmdown
+FINAL_LR_FRAC   = 0.0   # final LR as fraction of initial
+
+# Model size
+DEPTH           = 8      # number of transformer layers
+DEVICE_BATCH_SIZE = 128  # micro-batch size; reduce if OOM
+```
+
+#### Training Loop
+
+```
+for each micro-step (grad_accum_steps times):
+    forward + backward pass (bfloat16 autocast)
+
+update LR schedule (progress = elapsed / TIME_BUDGET)
+update Muon momentum schedule (ramps 0.85→0.95 over 300 steps)
+optimizer.step(); zero_grad
+
+log: step, loss (EMA), LR multiplier, tok/sec, MFU, remaining time
+
+if step == 0: freeze Python GC to prevent ~500ms stalls
+if loss > 100: abort (loss explosion)
+if elapsed >= TIME_BUDGET and step > 10: break
+```
+
+After training, `evaluate_bpb()` runs on the pinned validation shard and the final summary block is printed to stdout.
+
+---
+
+
 
 - **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
 - **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.

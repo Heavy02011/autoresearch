@@ -2,6 +2,38 @@
 Autoresearch pretraining script. Single-GPU, single-file.
 Cherry-picked and simplified from nanochat.
 Usage: uv run train.py
+
+Overview
+--------
+This script defines and trains a GPT-style language model entirely in one file.
+It is the file that the AI research agent modifies during autonomous experiments.
+
+Architecture (GPT model in train.py):
+  - Token embeddings (wte) with RMS normalization at the input.
+  - A stack of transformer Blocks, each containing:
+      * CausalSelfAttention with rotary position embeddings (RoPE), QK-norm, and
+        optional Value Embeddings (ResFormer-style) on alternating layers.
+      * MLP with ReLU² (squared ReLU) activation.
+      * Pre-norm residual connections with learnable per-layer scale factors
+        (resid_lambdas) and skip connections from the initial embedding (x0_lambdas).
+  - Output logits with soft-capping (tanh-based, cap=15) to improve training stability.
+
+Optimizer (MuonAdamW):
+  - Matrix parameters (attention/MLP weight matrices) are updated with the Muon
+    optimizer: Nesterov momentum + Polar Express Newton orthogonalization +
+    NorMuon variance reduction + cautious weight decay.
+  - All other parameters (embeddings, scalars, lm_head) use AdamW with per-group
+    learning rates scaled by 1/√(model_dim/768).
+
+Training loop:
+  - Fixed 5-minute wall-clock time budget (TIME_BUDGET from prepare.py).
+  - Gradient accumulation to reach TOTAL_BATCH_SIZE (~524K tokens/step).
+  - Cosine-style LR schedule: optional warmup → constant → warmdown.
+  - Automatic garbage-collection freeze after step 0 to prevent GC stalls.
+  - Evaluation metric: val_bpb (bits per byte) — lower is better.
+
+Hyperparameters are plain module-level constants (DEPTH, ASPECT_RATIO, etc.)
+so the agent can edit them directly without any CLI boilerplate.
 """
 
 import os
@@ -30,6 +62,24 @@ from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evalua
 
 @dataclass
 class GPTConfig:
+    """Configuration for the GPT model.
+
+    Attributes:
+        sequence_len: Maximum input sequence length in tokens (context window).
+        vocab_size: Total vocabulary size, including special tokens.
+        n_layer: Number of transformer blocks (depth of the network).
+        n_head: Number of query attention heads.
+        n_kv_head: Number of key/value heads. Must divide n_head evenly.
+            Set equal to n_head for standard multi-head attention (MHA).
+            Set smaller for grouped-query attention (GQA).
+        n_embd: Model hidden dimension (must equal n_head * head_dim).
+        window_pattern: Per-layer attention window pattern string.
+            Each character sets the window type for that layer (cycling if
+            n_layer > len(pattern)):
+              'L' — full context window (long)
+              'S' — half context window (short / sliding window)
+            The last layer is always forced to 'L' (full context).
+    """
     sequence_len: int = 2048
     vocab_size: int = 32768
     n_layer: int = 12
@@ -40,6 +90,14 @@ class GPTConfig:
 
 
 def norm(x):
+    """Apply RMS normalization over the last dimension of x.
+
+    Args:
+        x: Input tensor of any shape.
+
+    Returns:
+        Tensor of the same shape as x, normalized to unit RMS along the last dimension.
+    """
     return F.rms_norm(x, (x.size(-1),))
 
 
@@ -49,6 +107,20 @@ def has_ve(layer_idx, n_layer):
 
 
 def apply_rotary_emb(x, cos, sin):
+    """Apply rotary position embeddings (RoPE) to query or key tensor x.
+
+    Rotates pairs of channels using the given cosine/sine frequency tables,
+    enabling the model to encode relative position information in dot products
+    without modifying the sequence position explicitly.
+
+    Args:
+        x: Tensor of shape (B, T, n_head, head_dim).
+        cos: Cosine table of shape (1, T, 1, head_dim//2).
+        sin: Sine table of shape (1, T, 1, head_dim//2).
+
+    Returns:
+        Tensor of the same shape as x with rotary embeddings applied.
+    """
     assert x.ndim == 4
     d = x.shape[3] // 2
     x1, x2 = x[..., :d], x[..., d:]
@@ -58,6 +130,24 @@ def apply_rotary_emb(x, cos, sin):
 
 
 class CausalSelfAttention(nn.Module):
+    """Causal multi-head self-attention with RoPE, QK-norm, and optional Value Embeddings.
+
+    Key design choices:
+    - Rotary position embeddings (RoPE) are applied to both queries and keys so
+      attention scores capture relative position via rotation algebra.
+    - QK-norm: queries and keys are RMS-normalized before the dot product,
+      stabilizing attention logit magnitudes across depths and model sizes.
+    - FlashAttention-3 kernels handle the actual attention computation
+      (Hopper GPUs) or a community FA3 implementation (non-Hopper).
+    - Sliding window attention: each layer may attend to a limited local window
+      ('S' = half context) rather than the full sequence ('L'), reducing compute
+      for deep-middle layers while the last layer always sees the full context.
+    - Value Embeddings (ResFormer-style, on alternating layers): a learned
+      per-head residual is added to the value vectors, parameterized as a
+      token-embedding matrix. A small input-dependent sigmoid gate per head
+      controls the residual strength.
+    """
+
     def __init__(self, config, layer_idx):
         super().__init__()
         self.n_head = config.n_head
@@ -96,6 +186,17 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
+    """Two-layer feed-forward network with squared ReLU activation (ReLU²).
+
+    The hidden dimension is 4× the model dimension (standard GPT ratio).
+    ReLU² (squaring the ReLU output) provides smoother gradients and has been
+    shown empirically to improve language model performance compared to plain ReLU,
+    while being simpler than GELU or SwiGLU.
+
+    Projection weights are initialized to zero (output gate closed at init) to
+    support stable depth-scaling via the learnable residual scalars in the GPT class.
+    """
+
     def __init__(self, config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
@@ -109,6 +210,14 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
+    """Single transformer block: pre-norm attention + pre-norm MLP, both with residual connections.
+
+    Pre-norm (norm before each sub-layer) is standard in modern LLMs for
+    training stability. The residual scale factors (resid_lambdas, x0_lambdas)
+    that modulate this block's input are applied in the GPT.forward pass,
+    not here, so Block itself is a clean attention+MLP unit.
+    """
+
     def __init__(self, config, layer_idx):
         super().__init__()
         self.attn = CausalSelfAttention(config, layer_idx)
@@ -121,6 +230,29 @@ class Block(nn.Module):
 
 
 class GPT(nn.Module):
+    """GPT language model with depth-scaled dimensions, RoPE, Value Embeddings, and logit soft-capping.
+
+    Architecture summary:
+      Input → wte (token embed) → RMSNorm → [Block × n_layer] → RMSNorm → lm_head → softcap logits
+
+    Notable features beyond a vanilla GPT:
+    - **Depth-driven sizing**: model_dim = DEPTH * ASPECT_RATIO, rounded to the
+      nearest HEAD_DIM multiple, so depth alone controls model capacity.
+    - **Per-layer skip connections**: each Block input is a learned mix of
+      the previous hidden state (scaled by resid_lambdas[i]) and the original
+      post-embedding representation x0 (scaled by x0_lambdas[i]). This allows
+      the network to learn how much to rely on the residual stream vs. the raw
+      input at each depth.
+    - **Value Embeddings** (alternating layers): token-level value residuals
+      allow information from the embedding space to bypass the key–query
+      bottleneck, improving shallow-layer expressivity.
+    - **Logit soft-capping**: output logits are clamped softly via
+      `softcap * tanh(logits / softcap)` with cap=15. This bounds the
+      pre-softmax range and prevents extreme logit growth late in training.
+    - **Rotary embeddings** (RoPE): precomputed cos/sin tables up to
+      10× the context length, enabling length generalization.
+    """
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -466,6 +598,12 @@ vocab_size = tokenizer.get_vocab_size()
 print(f"Vocab size: {vocab_size:,}")
 
 def build_model_config(depth):
+    """Construct a GPTConfig from DEPTH and the module-level hyperparameters.
+
+    Model dimension is derived as depth * ASPECT_RATIO, then rounded up to the
+    nearest HEAD_DIM multiple so that n_embd is always divisible by HEAD_DIM.
+    The number of heads is simply n_embd // HEAD_DIM.
+    """
     base_dim = depth * ASPECT_RATIO
     model_dim = ((base_dim + HEAD_DIM - 1) // HEAD_DIM) * HEAD_DIM
     num_heads = model_dim // HEAD_DIM
@@ -515,6 +653,19 @@ print(f"Gradient accumulation steps: {grad_accum_steps}")
 # Schedules (all based on progress = training_time / TIME_BUDGET)
 
 def get_lr_multiplier(progress):
+    """Return the learning rate multiplier for a given training progress fraction.
+
+    The schedule has three phases, all expressed as fractions of TIME_BUDGET:
+      1. Warmup  [0, WARMUP_RATIO):     linear ramp from 0 → 1.
+      2. Constant [WARMUP_RATIO, 1-WARMDOWN_RATIO): multiplier = 1.0.
+      3. Warmdown [1-WARMDOWN_RATIO, 1]: linear decay from 1 → FINAL_LR_FRAC.
+
+    Args:
+        progress: Elapsed training time / TIME_BUDGET, clamped to [0, 1].
+
+    Returns:
+        Scalar multiplier applied to each parameter group's initial_lr.
+    """
     if progress < WARMUP_RATIO:
         return progress / WARMUP_RATIO if WARMUP_RATIO > 0 else 1.0
     elif progress < 1.0 - WARMDOWN_RATIO:
@@ -524,10 +675,22 @@ def get_lr_multiplier(progress):
         return cooldown * 1.0 + (1 - cooldown) * FINAL_LR_FRAC
 
 def get_muon_momentum(step):
+    """Return the Muon optimizer momentum for the current training step.
+
+    Momentum ramps linearly from 0.85 to 0.95 over the first 300 steps, then
+    stays at 0.95. A lower momentum at the start helps stability during the
+    initial noisy gradient phase (similar to Adam's beta1 warm-up intuition).
+    """
     frac = min(step / 300, 1)
     return (1 - frac) * 0.85 + frac * 0.95
 
 def get_weight_decay(progress):
+    """Return the Muon weight-decay coefficient for a given training progress fraction.
+
+    Weight decay starts at WEIGHT_DECAY and decays linearly to 0 by the end of
+    training. Reducing weight decay toward the end allows the model to converge
+    closer to the loss minimum without being pulled away by regularization.
+    """
     return WEIGHT_DECAY * (1 - progress)
 
 # ---------------------------------------------------------------------------
