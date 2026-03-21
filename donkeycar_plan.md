@@ -180,6 +180,11 @@ VAL_FRACTION   = 0.15            # fraction of tubs reserved for validation
 STEERING_SCALE = 1.0             # steering already in [−1, 1]
 THROTTLE_SCALE = 1.0             # throttle already in [0, 1]
 
+# Paths
+CACHE_DIR      = os.path.join(os.path.expanduser("~"), "donkeycar", "data")
+TUB_DIR        = os.path.join(CACHE_DIR, "sim_tub")
+BEST_MODEL_PATH = "best_model.pth"
+
 # Simulator evaluation settings
 SIM_PORT       = 9091            # port where sdsandbox is listening
 SIM_ENV_ID     = "donkey-generated-track-v0"
@@ -250,13 +255,55 @@ def evaluate_sim(model: torch.nn.Module,
 
     If the car hits a wall (info["hit"] != "none"), the episode is terminated
     early and the remaining steps are penalised with cte = 1.0.
+
+    If the simulator connection fails (socket error, timeout), raises
+    RuntimeError so the caller can treat it as a crash.
     """
 ```
+
+Observation-to-tensor preprocessing (inside `evaluate_sim`):
+
+```python
+# Per-step inference inside evaluate_sim:
+obs = env.step(action)          # obs: np.ndarray (120, 160, 3), dtype uint8
+img = torch.from_numpy(obs).permute(2, 0, 1).float() / 255.0   # (3, H, W) [0, 1]
+img = img.unsqueeze(0).to(device)                                # (1, 3, H, W)
+pred = model(img)               # → tensor (1, 2): [steering, throttle]
+steer = pred[0, 0].clamp(-1, 1).item()
+```
+
+The same normalisation (uint8 → float32 / 255, HWC → CHW) is used in `make_dataloader` so
+training and evaluation see identical inputs.
 
 > **Why mean absolute CTE?**  CTE (cross-track error, the lateral distance from the track centre)
 > is the most direct measure of how well the model keeps the car on the road.  Unlike steering MSE
 > over a static dataset, it reflects actual closed-loop behaviour in the simulator.  Lower is better,
 > and it is fully automated — no human needed.
+
+### 6.5 CLI / `__main__` block
+
+```python
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Prepare data for DonkeyCar AutoResearch")
+    parser.add_argument("--generate", action="store_true",
+                        help="Generate training tub from sdsandbox scripted driver")
+    parser.add_argument("--num-steps", type=int, default=20_000,
+                        help="Number of sim steps for tub generation")
+    parser.add_argument("--port", type=int, default=SIM_PORT,
+                        help="sdsandbox TCP port")
+    args = parser.parse_args()
+
+    if args.generate:
+        generate_sim_tub(num_steps=args.num_steps, port=args.port)
+    else:
+        print("Nothing to do. Use --generate to create a training tub.")
+```
+
+Usage:
+```bash
+python prepare_donkey.py --generate                # default: 20 k steps, port 9091
+python prepare_donkey.py --generate --num-steps 40000 --port 9092
+```
 
 ---
 
@@ -343,29 +390,138 @@ The agent instructions file has the same structure as `program.md` with driving-
 ```markdown
 # autoresearch — DonkeyCar × sdsandbox edition
 
+This is an experiment to have the LLM do its own research on autonomous driving.
+
 ## Setup
-1. Agree on a run tag and create branch `autoresearch/donkey-<tag>`.
-2. Read prepare_donkey.py and train_donkey.py in full.
-3. Verify the simulator is running:
-   ~/donkey_sim/donkey_sim.x86_64 --headless --port 9091 &
-4. Verify sim tub data exists at ~/donkeycar/data/sim_tub.
-   If not, ask the human to run: python prepare_donkey.py --generate
-5. Run baseline: python train_donkey.py > run.log 2>&1
-6. Initialise results_donkey.tsv with header row.
 
-## Goal
-Minimise val_cte (mean absolute cross-track error in sdsandbox — lower is better).
+To set up a new experiment, work with the user to:
 
-## Experiment loop
-Loop forever:
-1. Modify train_donkey.py (model, optimiser, augmentation, …).
-2. git commit.
-3. python train_donkey.py > run.log 2>&1
-4. grep "^val_cte:\|^peak_vram_mb:" run.log
-5. Log to results_donkey.tsv.
-6. If improved (lower val_cte): keep.  If not: git reset --hard HEAD~1.
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `donkey-mar5`). The branch
+   `autoresearch/donkey-<tag>` must not already exist — this is a fresh run.
+2. **Create the branch**: `git checkout -b autoresearch/donkey-<tag>` from current master.
+3. **Read the in-scope files**: The repo is small. Read these files for full context:
+   - `README.md` — repository context.
+   - `prepare_donkey.py` — fixed constants, tub data loading, simulator evaluation harness. Do not modify.
+   - `train_donkey.py` — the file you modify. CNN model, optimiser, training loop.
+4. **Verify the simulator is running**:
+   `~/donkey_sim/donkey_sim.x86_64 --headless --port 9091 &`
+   If it's not running, tell the human to start it.
+5. **Verify sim tub data exists** at `~/donkeycar/data/sim_tub`.
+   If not, tell the human to run: `python prepare_donkey.py --generate`
+6. **Initialise results_donkey.tsv**: Create `results_donkey.tsv` with just the header row.
+   The baseline will be recorded after the first run.
+7. **Confirm and go**: Confirm setup looks good.
+
+Once you get confirmation, kick off the experimentation.
+
+## Experimentation
+
+Each experiment runs on a single GPU. The training script runs for a **fixed time
+budget of 5 minutes** (wall-clock training time, excluding startup overhead). You
+launch it simply as: `python train_donkey.py`.
+
+**What you CAN do:**
+- Modify `train_donkey.py` — this is the only file you edit. Everything is fair game:
+  model architecture, optimiser, hyperparameters, augmentation, loss function, batch size, etc.
+
+**What you CANNOT do:**
+- Modify `prepare_donkey.py`. It is read-only. It contains the fixed evaluation harness,
+  tub data loading, simulator interface, and training constants (time budget, image size, etc).
+- Install new packages or add dependencies.
+- Modify the evaluation harness. The `evaluate_sim` function in `prepare_donkey.py` is the
+  ground-truth metric.
+
+**The goal is simple: get the lowest val_cte.** Since the time budget is fixed, you don't
+need to worry about training time — it's always 5 minutes. Everything is fair game: change
+the architecture, the optimiser, the hyperparameters, the augmentation, the loss function.
+The only constraint is that the code runs without crashing and finishes within the time budget.
+
+**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_cte gains, but
+it should not blow up dramatically.
+
+**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds
+ugly complexity is not worth it. Conversely, removing something and getting equal or better
+results is a great outcome — that's a simplification win.
+
+**The first run**: Your very first run should always be to establish the baseline, so you will
+run the training script as is.
+
+## Output format
+
+Once the script finishes it prints a summary like this:
+
+    ---
+    val_cte:          0.045231
+    training_seconds: 300.1
+    total_seconds:    320.4
+    peak_vram_mb:     1240.0
+    num_epochs:       42
+    num_samples:      12800
+    num_params_k:     427
+
+You can extract the key metric from the log file:
+
+    grep "^val_cte:" run.log
+
+## Logging results
+
+When an experiment is done, log it to `results_donkey.tsv` (tab-separated, NOT comma-separated).
+
+The TSV has a header row and 5 columns:
+
+    commit	val_cte	memory_gb	status	description
+
+1. git commit hash (short, 7 chars)
+2. val_cte achieved (e.g. 0.045231) — use 0.000000 for crashes
+3. peak memory in GB, round to .1f (e.g. 1.2 — divide peak_vram_mb by 1024) — use 0.0 for crashes
+4. status: `keep`, `discard`, or `crash`
+5. short text description of what this experiment tried
+
+Example:
+
+    commit	val_cte	memory_gb	status	description
+    a1b2c3d	0.045231	1.2	keep	baseline
+    b2c3d4e	0.038400	1.3	keep	add batch norm to encoder
+    c3d4e5f	0.052000	1.2	discard	switch to SGD (worse)
+    d4e5f6g	0.000000	0.0	crash	double model width (OOM)
+
+## The experiment loop
+
+The experiment runs on a dedicated branch (e.g. `autoresearch/donkey-mar5`).
+
+LOOP FOREVER:
+
+1. Look at the git state: the current branch/commit we're on.
+2. Tune `train_donkey.py` with an experimental idea by directly hacking the code.
+3. git commit.
+4. Run the experiment: `python train_donkey.py > run.log 2>&1`
+   (redirect everything — do NOT use tee or let output flood your context)
+5. Read out the results: `grep "^val_cte:\|^peak_vram_mb:" run.log`
+6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the
+   Python stack trace and attempt a fix.
+7. Record the results in the TSV (NOTE: do not commit results_donkey.tsv, leave it untracked).
+8. If val_cte improved (lower), you "advance" the branch, keeping the git commit.
+9. If val_cte is equal or worse, you git reset back to where you started.
+
+**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and
+eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and
+revert).
+
+**Crashes**: If a run crashes (OOM, sim connection failure, or a bug), use your judgement:
+If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run.
+If the idea itself is fundamentally broken, just skip it, log "crash" as the status, and
+move on.
+
+**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause
+to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a
+good stopping point?". The human might be asleep, or gone from a computer and expects you
+to continue working *indefinitely* until you are manually stopped. You are autonomous. If
+you run out of ideas, think harder — re-read the in-scope files for new angles, try
+combining previous near-misses, try more radical architectural changes, look at the
+experiment ideas table in the plan. The loop runs until the human interrupts you, period.
 
 ## Deployment check (optional, manual)
+
 After a significant improvement, export for the real car:
   python export_donkey.py   # produces autopilot.onnx
   # copy to Raspberry Pi and run donkey drive --model autopilot.onnx
@@ -396,20 +552,43 @@ After a significant improvement, export for the real car:
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-`export_donkey.py` (a small fixed utility, not agent-editable):
+`export_donkey.py` (a small fixed utility, not agent-editable) — see Section 9.1 below.
+
+### 9.1 `export_donkey.py` — ONNX Export Utility
+
+This file is **not agent-editable**. It loads the best model checkpoint, exports it to ONNX,
+and optionally validates the exported model against the PyTorch version.
 
 ```python
+"""Export the best DonkeyCar model to ONNX for deployment on Raspberry Pi / Jetson."""
+import argparse
+import numpy as np
 import torch
 from train_donkey import DonkeyNet
+from prepare_donkey import IMG_H, IMG_W, BEST_MODEL_PATH
 
-model = DonkeyNet()
-model.load_state_dict(torch.load("best_model.pth", map_location="cpu"))
-model.eval()
-dummy = torch.zeros(1, 3, 120, 160)
-torch.onnx.export(model, dummy, "autopilot.onnx",
-                  input_names=["image"], output_names=["controls"],
-                  opset_version=17)
-print("Exported autopilot.onnx")
+def export(model_path: str = BEST_MODEL_PATH, output: str = "autopilot.onnx"):
+    model = DonkeyNet()
+    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    model.eval()
+    dummy = torch.zeros(1, 3, IMG_H, IMG_W)
+    torch.onnx.export(model, dummy, output,
+                      input_names=["image"], output_names=["controls"],
+                      opset_version=17, dynamic_axes=None)
+    # Validation: compare ONNX output against PyTorch
+    import onnxruntime as ort
+    session = ort.InferenceSession(output)
+    pt_out = model(dummy).detach().numpy()
+    onnx_out = session.run(None, {"image": dummy.numpy()})[0]
+    max_diff = np.max(np.abs(pt_out - onnx_out))
+    print(f"Exported {output}  (max PyTorch/ONNX diff: {max_diff:.6f})")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default=BEST_MODEL_PATH, help="Path to .pth checkpoint")
+    parser.add_argument("--output", default="autopilot.onnx", help="Output ONNX path")
+    args = parser.parse_args()
+    export(args.model, args.output)
 ```
 
 On the Raspberry Pi the DonkeyCar `manage.py` is configured with a custom
@@ -424,11 +603,42 @@ On the Raspberry Pi the DonkeyCar `manage.py` is configured with a custom
 | Training GPU | Any CUDA GPU (GTX 1060 6 GB minimum; RTX 3090+ recommended) |
 | Simulator OS | Linux / macOS / Windows (sdsandbox binary from gym-donkeycar releases) |
 | Python | 3.10+ |
-| Key packages | `torch`, `gym-donkeycar`, `gymnasium`, `donkeycar`, `pillow`, `numpy` |
+| Key packages | `torch`, `gym-donkeycar`, `gymnasium`, `pillow`, `numpy` |
 | Car computer (optional) | Raspberry Pi 4 (4 GB) or Jetson Orin Nano |
 
 For a laptop-only setup (no GPU): lower `IMG_H×IMG_W` to `66×200`
 (NVIDIA DAVE-2 style: height=66, width=200) and reduce the CNN depth — smaller images train faster on CPU.
+
+### 10.1 New dependencies to add to `pyproject.toml`
+
+The DonkeyCar adaptation requires these additional packages beyond the existing
+`pyproject.toml` dependencies:
+
+```toml
+# Add to [project] dependencies list:
+"gym-donkeycar>=22.11.6",    # Gym wrapper for sdsandbox simulator
+"gymnasium>=0.29.0",         # OpenAI Gym interface (successor to gym)
+"pillow>=10.0.0",            # Image loading from tub JPEG files
+"onnx>=1.15.0",              # ONNX model format (for export)
+"onnxruntime>=1.17.0",       # ONNX inference (for export validation)
+```
+
+> **Note**: `torch` and `numpy` are already present. The `donkeycar` pip package is
+> **not** required — the plan uses gym-donkeycar directly for simulator access and
+> implements tub parsing natively (to avoid pulling in the full donkeycar dependency tree
+> with TensorFlow/Keras).
+
+### 10.2 `.gitignore` additions
+
+Add to the existing `.gitignore`:
+
+```gitignore
+# DonkeyCar experiment artifacts
+results_donkey.tsv
+best_model.pth
+autopilot.onnx
+run.log
+```
 
 ---
 
@@ -479,11 +689,15 @@ hyperparameter sweeps in AutoResearch):
 - [ ] Start sdsandbox headless server: `~/donkey_sim/donkey_sim.x86_64 --headless --port 9091 &`
 - [ ] Run `python prepare_donkey.py --generate` to produce the training tub (~20 k frames)
 
+### Project configuration
+- [ ] Add new dependencies to `pyproject.toml` (Section 10.1)
+- [ ] Add donkey artifacts to `.gitignore` (Section 10.2)
+
 ### Files to write
-- [ ] Write `prepare_donkey.py` (tub loader, `generate_sim_tub`, `evaluate_sim`)
+- [ ] Write `prepare_donkey.py` (constants, tub loader, `generate_sim_tub`, `evaluate_sim`, CLI)
 - [ ] Write `train_donkey.py` (baseline `DonkeyNet`, training loop, `val_cte` output)
 - [ ] Write `program_donkey.md` (agent instructions, Section 8 template)
-- [ ] Write `export_donkey.py` (ONNX export utility)
+- [ ] Write `export_donkey.py` (ONNX export utility, Section 9.1)
 - [ ] Write `sim_setup.md` (one-time installation guide for sdsandbox + gym-donkeycar)
 
 ### Autonomous experiment loop
