@@ -266,7 +266,7 @@ Observation-to-tensor preprocessing (inside `evaluate_sim`):
 ```python
 # Per-step inference inside evaluate_sim:
 obs = env.step(action)          # obs: np.ndarray (120, 160, 3), dtype uint8
-img = torch.from_numpy(obs).permute(2, 0, 1).float() / 255.0   # (3, H, W) [0, 1]
+img = torch.from_numpy(obs).permute(2, 0, 1).float() / 255.0   # (3, 120, 160) [0, 1]
 img = img.unsqueeze(0).to(device)                                # (1, 3, H, W)
 pred = model(img)               # → tensor (1, 2): [steering, throttle]
 steer = pred[0, 0].clamp(-1, 1).item()
