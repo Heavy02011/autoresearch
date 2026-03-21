@@ -84,6 +84,10 @@ I think these would be the reasonable hyperparameters to play with. Ask your fav
 - [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
 - [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
 
+## Adapting to other domains
+
+See [donkeycar_plan.md](donkeycar_plan.md) for a concrete plan that applies this framework to optimising the neural-network autopilot of a [DonkeyCar](https://github.com/autorope/donkeycar) RC vehicle — same autonomous experiment loop, same 5-minute budget, but with a CNN driving model and steering MSE as the metric instead of GPT and val_bpb.
+
 ## License
 
 MIT
