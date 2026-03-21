@@ -50,8 +50,12 @@ class DonkeyNet(nn.Module):
             nn.Conv2d(64, 64, 3, stride=1), nn.ReLU(),
             nn.Flatten(),
         )
+        # Compute flattened feature size from encoder output shape
+        with torch.no_grad():
+            dummy = torch.zeros(1, IMG_CHANNELS, IMG_H, IMG_W)
+            flat_size = self.encoder(dummy).shape[1]  # 1152 for default 120x160 input
         self.head = nn.Sequential(
-            nn.Linear(1152, 100), nn.ReLU(),
+            nn.Linear(flat_size, 100), nn.ReLU(),
             nn.Linear(100, 50), nn.ReLU(),
             nn.Linear(50, 2),    # [steering, throttle]
         )
