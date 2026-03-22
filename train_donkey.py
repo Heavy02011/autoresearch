@@ -4,10 +4,13 @@ Trains a CNN autopilot model on simulator tub data and evaluates
 closed-loop in sdsandbox.
 
 Usage: python train_donkey.py
+       python train_donkey.py --tub /path/to/tub
+       DONKEY_TUB=/path/to/tub python train_donkey.py
 """
 
 import os
 import time
+import argparse
 
 import torch
 import torch.nn as nn
@@ -73,14 +76,28 @@ def count_parameters(model):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Train DonkeyCar autopilot")
+    parser.add_argument("--tub", type=str, default=None,
+                        help="Path to tub directory (overrides DONKEY_TUB env var and default "
+                             "~/donkeycar/data/sim_tub). Accepts sim-generated or real-world tubs.")
+    args = parser.parse_args()
+
+    # Resolve tub base directory: CLI flag > env var > default
+    tub_base = args.tub or os.environ.get("DONKEY_TUB")
+    if tub_base:
+        tub_base = os.path.expanduser(tub_base)
+
     # Device
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
 
     # Find tub data
-    tub_paths = find_tub_paths()
+    tub_paths = find_tub_paths(tub_base)
     if not tub_paths:
-        print("ERROR: No tub data found. Run: python prepare_donkey.py --generate")
+        if tub_base:
+            print(f"ERROR: No tub data found at '{tub_base}'.")
+        else:
+            print("ERROR: No tub data found. Run: python prepare_donkey.py --generate")
         return
     print(f"Found {len(tub_paths)} tub(s)")
 
