@@ -27,3 +27,4 @@ results_donkey.tsv
 best_model.pth
 autopilot.onnx
 run.log
+progress_donkey.png
