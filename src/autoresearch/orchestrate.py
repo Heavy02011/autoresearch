@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from typing import Optional, Dict, Any
+import contextlib
+import signal
 import time
 import torch
 
@@ -14,6 +16,33 @@ from .logging_config import get_logger
 from .training import get_training_iterator
 
 logger = get_logger(__name__)
+
+
+class _TimeoutError(RuntimeError):
+    """Raised when a watchdog timeout fires."""
+
+
+@contextlib.contextmanager
+def _timeout(seconds: int, label: str):
+    """
+    Context manager that raises _TimeoutError after *seconds*.
+
+    Uses SIGALRM on Unix; silently disabled on platforms that lack it.
+    """
+    if seconds <= 0 or not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def _handler(signum, frame):  # noqa: ANN001
+        raise _TimeoutError(f"{label} exceeded timeout of {seconds}s")
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 class Orchestrator:
@@ -41,6 +70,21 @@ class Orchestrator:
         self.artifact_manager.save_config_snapshot(config)
         self.artifact_manager.save_metadata()
 
+        # W&B initialisation (no-op when disabled)
+        self._wandb = None
+        if config.environment.use_wandb:
+            try:
+                import wandb  # type: ignore
+                self._wandb = wandb.init(
+                    project=config.environment.wandb_project or "autoresearch",
+                    name=run_id,
+                    config=config.model_dump(),
+                    reinit=True,
+                )
+                self.logger.info("W&B run initialised", run_id=run_id)
+            except Exception as exc:  # pragma: no cover
+                self.logger.warning("W&B init failed, continuing without tracking", error=str(exc))
+
     def run_autonomous_loop(self) -> None:
         """
         Execute the full training loop.
@@ -61,20 +105,31 @@ class Orchestrator:
             self.logger.info("Starting iteration", iteration=iteration)
 
             # ===== TRAINING STAGE =====
+            train_timeout = int(self.config.training.time_budget_minutes * 60 * 1.5) + 60
             if self.config.dry_run:
                 model_path = self._dummy_checkpoint(iteration)
             else:
-                model_path = self._train_iteration(iteration)
+                try:
+                    with _timeout(train_timeout, f"Training iter {iteration}"):
+                        model_path = self._train_iteration(iteration)
+                except _TimeoutError as exc:
+                    self.logger.error("Training watchdog fired", iteration=iteration, error=str(exc))
+                    model_path = self._dummy_checkpoint(iteration)
 
             # ===== EVALUATION STAGE =====
             self.state_tracker.transition(PromotionState.EVALUATING, iteration=iteration)
-            
+
+            eval_timeout = self.config.evaluation.timeout_seconds + 60
             try:
-                metrics = self.evaluator.evaluate_model(
-                    model_path,
-                    iteration,
-                    dry_run=self.config.dry_run,
-                )
+                with _timeout(eval_timeout, f"Evaluation iter {iteration}"):
+                    metrics = self.evaluator.evaluate_model(
+                        model_path,
+                        iteration,
+                        dry_run=self.config.dry_run,
+                    )
+            except _TimeoutError as exc:
+                self.logger.error("Evaluation watchdog fired", iteration=iteration, error=str(exc))
+                continue
             except Exception as e:
                 self.logger.error("Evaluation failed", iteration=iteration, error=str(e))
                 continue
@@ -82,6 +137,14 @@ class Orchestrator:
             # Save evaluation metrics
             self.artifact_manager.save_metrics(iteration, metrics)
             self.state_tracker.update_latest_metrics(metrics)
+
+            # W&B per-iteration metrics
+            if self._wandb is not None:
+                try:
+                    import wandb  # type: ignore
+                    wandb.log({"iteration": iteration, **{k: float(v) for k, v in metrics.items() if isinstance(v, (int, float))}})
+                except Exception:  # pragma: no cover
+                    pass
 
             # ===== PROMOTION GATE STAGE =====
             self.state_tracker.transition(PromotionState.PROMOTION_GATE, iteration=iteration, metrics=metrics)
@@ -106,8 +169,20 @@ class Orchestrator:
                     import shutil
                     shutil.copy(model_path, best_model_path)
                     self.logger.info("Model promoted", iteration=iteration, path=str(best_model_path))
-                
+
                 best_metric = metrics.get("lap_time")
+
+                # W&B: log promoted model artifact metadata
+                if self._wandb is not None:
+                    try:
+                        import wandb  # type: ignore
+                        wandb.log({
+                            "promoted/iteration": iteration,
+                            "promoted/lap_time": best_metric,
+                            "promoted/checkpoint": str(model_path),
+                        })
+                    except Exception:  # pragma: no cover
+                        pass
             else:
                 # Discard and loop
                 self.state_tracker.transition(
@@ -121,6 +196,16 @@ class Orchestrator:
             time.sleep(1)
 
         self.logger.info("Autonomous loop complete", run_id=self.run_id)
+
+        # Finalise W&B run
+        if self._wandb is not None:
+            try:
+                import wandb  # type: ignore
+                if best_metric is not None:
+                    wandb.summary["best_lap_time"] = best_metric
+                wandb.finish()
+            except Exception:  # pragma: no cover
+                pass
 
     def _train_iteration(self, iteration: int) -> Path:
         """

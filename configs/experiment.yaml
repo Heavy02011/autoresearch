@@ -5,7 +5,7 @@ training:
   learning_rate: 0.001
   batch_size: 32
   num_epochs: 5
-  time_budget_minutes: 5.0
+  time_budget_minutes: 5.0    # Watchdog fires at 1.5x this value (+60s buffer)
   model_type: cnn
   seed: 42
 
@@ -14,7 +14,7 @@ evaluation:
   map_name: "donkey_sim_path"
   num_laps: 3
   seed: 42
-  timeout_seconds: 300
+  timeout_seconds: 300        # Watchdog fires at this value +60s
   metric_name: "lap_time"
 
 promotion:

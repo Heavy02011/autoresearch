@@ -1,0 +1,58 @@
+version: "3.9"
+
+services:
+  training:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: autoresearch:latest
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - AUTORESEARCH_RUNS_DIR=/autoresearch/runs
+      - DONKEY_SIM_PATH=${DONKEY_SIM_PATH:-/opt/sdsandbox/sdsim.x86_64}
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - WANDB_PROJECT=${WANDB_PROJECT:-autoresearch}
+    volumes:
+      - runs_data:/autoresearch/runs
+      - ./configs:/autoresearch/configs:ro
+      - ${DONKEY_SIM_PATH:-/dev/null}:/opt/sdsandbox/sdsim.x86_64:ro
+    command: ["run", "--max-iterations", "10"]
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Dry-run validation (no GPU required)
+  training-dry:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: autoresearch:latest
+    environment:
+      - AUTORESEARCH_RUNS_DIR=/autoresearch/runs
+    volumes:
+      - runs_data:/autoresearch/runs
+      - ./configs:/autoresearch/configs:ro
+    command: ["run", "--dry-run", "--max-iterations", "2"]
+
+  # Preflight check only
+  preflight:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: autoresearch:latest
+    environment:
+      - DONKEY_SIM_PATH=${DONKEY_SIM_PATH:-}
+    volumes:
+      - ./configs:/autoresearch/configs:ro
+    command: ["preflight"]
+
+volumes:
+  runs_data:
+    driver: local

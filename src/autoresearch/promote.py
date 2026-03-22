@@ -44,6 +44,7 @@ class PromotionGate:
         if self.config.require_operability_check and not operability_check_passed:
             reason = "Failed operability check"
             self.logger.info("Promotion decision", verdict="FAIL", reason=reason)
+            self._log_wandb("FAIL", reason, metrics, baseline_metric)
             return False, reason
 
         # Check 2: Metric threshold
@@ -51,11 +52,13 @@ class PromotionGate:
         if lap_time is None:
             reason = "No lap_time metric found"
             self.logger.warning("Promotion decision", verdict="FAIL", reason=reason)
+            self._log_wandb("FAIL", reason, metrics, baseline_metric)
             return False, reason
 
         if lap_time > self.config.metric_threshold:
             reason = f"Lap time {lap_time:.2f}s exceeds threshold {self.config.metric_threshold}s"
             self.logger.info("Promotion decision", verdict="FAIL", reason=reason)
+            self._log_wandb("FAIL", reason, metrics, baseline_metric)
             return False, reason
 
         # Check 3: Improvement over baseline
@@ -67,9 +70,40 @@ class PromotionGate:
                     f"minimum {self.config.min_improvement_percent}%"
                 )
                 self.logger.info("Promotion decision", verdict="FAIL", reason=reason)
+                self._log_wandb("FAIL", reason, metrics, baseline_metric)
                 return False, reason
 
         # All checks passed
         reason = f"All criteria met (lap_time: {lap_time:.2f}s)"
         self.logger.info("Promotion decision", verdict="PASS", reason=reason)
+        self._log_wandb("PASS", reason, metrics, baseline_metric)
         return True, reason
+
+    def _log_wandb(
+        self,
+        verdict: str,
+        reason: str,
+        metrics: Dict[str, Any],
+        baseline_metric: Optional[float],
+    ) -> None:
+        """Log gate decision trace to W&B (no-op if W&B is not active)."""
+        try:
+            import wandb  # type: ignore
+            if wandb.run is None:
+                return
+            payload: Dict[str, Any] = {
+                "gate/verdict": verdict,
+                "gate/reason": reason,
+            }
+            if baseline_metric is not None:
+                payload["gate/baseline_lap_time"] = baseline_metric
+            lap_time = metrics.get("lap_time")
+            if lap_time is not None:
+                payload["gate/lap_time"] = lap_time
+                if baseline_metric is not None:
+                    payload["gate/improvement_pct"] = (
+                        (baseline_metric - lap_time) / baseline_metric * 100
+                    )
+            wandb.log(payload)
+        except Exception:  # pragma: no cover
+            pass

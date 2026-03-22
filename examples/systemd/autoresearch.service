@@ -1,0 +1,49 @@
+[Unit]
+Description=autoresearch - Autonomous DonkeyCar Steering Optimization
+Documentation=https://github.com/karpathy/autoresearch
+After=network.target
+
+[Service]
+Type=simple
+User=autoresearch
+Group=autoresearch
+WorkingDirectory=/opt/autoresearch
+
+# Environment
+Environment=PYTHONPATH=/opt/autoresearch/src
+Environment=AUTORESEARCH_RUNS_DIR=/var/lib/autoresearch/runs
+# Set your simulator path:
+Environment=DONKEY_SIM_PATH=/opt/sdsandbox/donkey_sim.x86_64
+# Optional W&B (uncomment and set your key):
+# Environment=WANDB_API_KEY=your_key_here
+# Environment=WANDB_PROJECT=autoresearch
+
+# Virtualenv (adjust path to match your installation)
+ExecStartPre=/opt/autoresearch/.venv/bin/python -m autoresearch.preflight
+ExecStart=/opt/autoresearch/.venv/bin/autoresearch run \
+    --config /etc/autoresearch/experiment.yaml \
+    --run-id overnight-%i \
+    --max-iterations 20
+
+# Restart policy
+Restart=on-failure
+RestartSec=30s
+# Maximum 3 restarts in 5 minutes before giving up
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+# Resource limits
+# Adjust CPUQuota and MemoryMax to your hardware
+CPUQuota=80%
+MemoryMax=28G
+
+# Logging — send stdout/stderr to journal + /var/log/autoresearch/
+StandardOutput=append:/var/log/autoresearch/autoresearch.log
+StandardError=append:/var/log/autoresearch/autoresearch.err
+
+# Kill cleanly (allow 60s for checkpoint save on shutdown)
+TimeoutStopSec=60
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

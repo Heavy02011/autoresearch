@@ -153,6 +153,20 @@ class TrainingIterator:
                 loss=debiased_loss,
                 step_time_ms=step_time * 1000,
             )
+
+            # W&B per-step loss (every 50 steps to reduce overhead)
+            if self.step % 50 == 0:
+                try:
+                    import wandb  # type: ignore
+                    if wandb.run is not None:
+                        wandb.log({
+                            "train/loss": debiased_loss,
+                            "train/step": self.step,
+                            "train/iteration": iteration,
+                            "train/step_time_ms": step_time * 1000,
+                        }, commit=False)
+                except Exception:
+                    pass
             
             # Fail fast on exploding loss
             if train_loss_f > 100:
