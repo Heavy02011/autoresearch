@@ -18,6 +18,21 @@ To set up a new experiment, work with the user to:
    If it's not running, tell the human to start it.
 5. **Verify sim tub data exists** at `~/donkeycar/data/sim_tub`.
    If not, tell the human to run: `python prepare_donkey.py --generate`
+
+   **Using real-world data**: If you have an existing tub recorded from a real DonkeyCar (or any
+   other source), you can use it directly — no simulation required.  Simply point the training
+   script at it:
+   ```bash
+   python train_donkey.py --tub /path/to/real_world_tub
+   # or, using the environment variable:
+   DONKEY_TUB=/path/to/real_world_tub python train_donkey.py
+   ```
+   To inspect a tub (count records, verify format) without training:
+   ```bash
+   python prepare_donkey.py --tub /path/to/real_world_tub
+   ```
+   Both catalogue-based tubs (`manifest.json` + JSONL catalogue files) and legacy
+   `record_*.json` tubs are supported.
 6. **Initialise results_donkey.tsv**: Create `results_donkey.tsv` with just the header row.
    The baseline will be recorded after the first run.
 7. **Confirm and go**: Confirm setup looks good.

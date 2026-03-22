@@ -4,8 +4,10 @@ Fixed preparation and evaluation utilities for DonkeyCar AutoResearch experiment
 Usage:
     python prepare_donkey.py --generate                # generate tub with 20k steps on port 9091
     python prepare_donkey.py --generate --num-steps 40000 --port 9092
+    python prepare_donkey.py --tub /path/to/existing/tub  # inspect / validate an existing tub
 
-Data is stored in ~/donkeycar/data/sim_tub/.
+The default sim-generated tub is stored in ~/donkeycar/data/sim_tub/.
+Any pre-existing tub (e.g. from real-world driving data) can be passed via --tub.
 
 This file is READ-ONLY for the agent — do not modify.
 """
@@ -394,9 +396,25 @@ if __name__ == "__main__":
                         help="Number of sim steps for tub generation")
     parser.add_argument("--port", type=int, default=SIM_PORT,
                         help="sdsandbox TCP port")
+    parser.add_argument("--tub", type=str, default=None,
+                        help="Path to an existing tub directory to inspect/validate "
+                             "(e.g. real-world data). Overrides the default sim_tub location.")
     args = parser.parse_args()
 
     if args.generate:
         generate_sim_tub(num_steps=args.num_steps, port=args.port)
+    elif args.tub:
+        tub_path = os.path.expanduser(args.tub)
+        tub_paths = find_tub_paths(tub_path)
+        if not tub_paths:
+            print(f"ERROR: No valid tub found at '{tub_path}'.")
+            sys.exit(1)
+        total = 0
+        for tp in tub_paths:
+            records = _parse_tub(tp)
+            print(f"  {tp}: {len(records)} records")
+            total += len(records)
+        print(f"Total: {total} records across {len(tub_paths)} tub(s)")
     else:
-        print("Nothing to do. Use --generate to create a training tub.")
+        print("Nothing to do. Use --generate to create a training tub, "
+              "or --tub <path> to inspect an existing one.")
