@@ -1,0 +1,29 @@
+# Experiment configuration for autonomous loop
+# Usage: autoresearch run --config configs/experiment.yaml
+
+training:
+  learning_rate: 0.001
+  batch_size: 32
+  num_epochs: 5
+  time_budget_minutes: 5.0
+  model_type: cnn
+  seed: 42
+
+evaluation:
+  simulator_version: "4.2.0"
+  map_name: "donkey_sim_path"
+  num_laps: 3
+  seed: 42
+  timeout_seconds: 300
+  metric_name: "lap_time"
+
+promotion:
+  metric_threshold: 25.0
+  require_operability_check: true
+  min_improvement_percent: 0.0
+  allow_rollback: true
+
+environment:
+  log_level: INFO
+  use_wandb: false
+  wandb_project: null

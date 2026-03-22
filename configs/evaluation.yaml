@@ -1,0 +1,8 @@
+# Evaluation configuration (simulator settings)
+simulator_version: "4.2.0"
+map_name: "donkey_sim_path"
+num_laps: 3
+seed: 42
+timeout_seconds: 300
+metric_name: "lap_time"
+port: 9091

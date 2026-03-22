@@ -1,0 +1,7 @@
+# Environment paths and settings
+project_root: .
+runs_dir: ./runs
+configs_dir: ./configs
+log_level: INFO
+use_wandb: false
+wandb_project: null
