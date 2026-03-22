@@ -18,7 +18,7 @@
 | Eval track         | Unseen track (not in the training set)                |
 | Throttle behaviour | "interesting it ignored throttle adjustments"          |
 
-> *"I set up kaparthy's autoresearcher on the sim last night and got a
+> *"I set up karpathy's autoresearcher on the sim last night and got a
 > decent model, interesting it ignored throttle adjustments.  The model was
 > trained on the other tracks and this is the eval on a track it's never
 > seen."*
