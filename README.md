@@ -86,7 +86,70 @@ I think these would be the reasonable hyperparameters to play with. Ask your fav
 
 ## Adapting to other domains
 
-See [donkeycar_plan.md](donkeycar_plan.md) for a concrete plan that applies this framework to optimising the neural-network autopilot of a [DonkeyCar](https://github.com/autorope/donkeycar) RC vehicle — same autonomous experiment loop, same 5-minute budget, but with a CNN driving model and steering MSE as the metric instead of GPT and val_bpb.
+### DonkeyCar autonomous steering implementation
+
+This repo includes a complete implementation of the autoresearch loop for the [DonkeyCar](https://github.com/autorope/donkeycar) RC vehicle simulator — same autonomous experiment loop, same 5-minute budget, but optimising a CNN steering model against lap time in [sdsandbox](https://github.com/tawnkramer/sdsandbox) instead of GPT and val_bpb.
+
+**Planning documents:**
+- [donkeycar_plan.md](donkeycar_plan.md) — high-level plan and motivation
+- [program_donkey.md](program_donkey.md) — agent instructions (equivalent of `program.md`)
+- [SETUP.md](SETUP.md) — full setup guide: Python env, CUDA, simulator, Docker, W&B, troubleshooting
+
+**Key source files:**
+- [`src/autoresearch/orchestrate.py`](src/autoresearch/orchestrate.py) — autonomous loop (train → evaluate → gate → keep/discard)
+- [`src/autoresearch/training.py`](src/autoresearch/training.py) — time-budgeted training iterator wrapping `train_donkey.py`
+- [`src/autoresearch/evaluate.py`](src/autoresearch/evaluate.py) — gym-donkeycar simulator evaluation (lap time, CTE)
+- [`src/autoresearch/promote.py`](src/autoresearch/promote.py) — promotion gate (metric threshold + operability check)
+- [`src/autoresearch/state.py`](src/autoresearch/state.py) — 5-state machine with disk persistence and rollback
+- [`src/autoresearch/cli.py`](src/autoresearch/cli.py) — Typer CLI: `run`, `status`, `rollback`, `export`, `preflight`, `compare`
+
+### Testing the DonkeyCar implementation
+
+**Step 1 — Install:**
+```bash
+uv sync
+# or: pip install -e .
+```
+
+**Step 2 — Validate environment (no GPU/simulator needed):**
+```bash
+autoresearch preflight
+```
+
+**Step 3 — Dry-run (no GPU, no simulator — always passes):**
+```bash
+autoresearch run --dry-run --max-iterations 2 --run-id test-local
+```
+
+**Step 4 — Run the test suite:**
+```bash
+# All CI-safe tests (no GPU, no simulator):
+pytest tests/ -v -k "not gpu and not simulator"
+
+# Individual test files:
+pytest tests/test_units.py -v          # Config, gate, artifact unit tests
+pytest tests/test_state_machine.py -v  # State machine edge cases
+pytest tests/test_e2e.py -v            # Full pipeline integration (dry-run)
+pytest tests/test_production.py -v     # Production validation (dry-run subset)
+```
+
+**Step 5 — Check a completed run:**
+```bash
+autoresearch status test-local
+autoresearch status test-local --format json
+```
+
+**With real GPU + simulator** (see [SETUP.md](SETUP.md) for full prereqs):
+```bash
+export DONKEY_SIM_PATH=~/sdsandbox/donkey_sim.x86_64
+autoresearch run --max-iterations 10 --run-id overnight-001
+```
+
+**Docker (no local Python env needed):**
+```bash
+docker build -f docker/Dockerfile -t autoresearch:latest .
+docker compose -f docker/docker-compose.yml run training-dry
+```
 
 ## License
 
