@@ -121,12 +121,10 @@ chmod +x ~/donkey_sim/donkey_sim.x86_64
 
 ### 5.2 Install gym-donkeycar Python package
 
-```bash
-pip install git+https://github.com/tawnkramer/gym-donkeycar
-```
+gym-donkeycar is already declared in `pyproject.toml`. Install all dependencies via uv:
 
 ```bash
-pip install gym-donkeycar==22.11.6   # example; replace with current release
+uv sync
 ```
 
 ### 5.3 Start the simulator in server mode (headless)
@@ -623,7 +621,7 @@ The DonkeyCar adaptation requires these additional packages beyond the existing
 "onnxruntime>=1.17.0",       # ONNX inference (for export validation)
 ```
 
-> **Note**: `torch` and `numpy` are already present. The `donkeycar` pip package is
+> **Note**: `torch` and `numpy` are already present. The `donkeycar` package is
 > **not** required — the plan uses gym-donkeycar directly for simulator access and
 > implements tub parsing natively (to avoid pulling in the full donkeycar dependency tree
 > with TensorFlow/Keras).
@@ -685,7 +683,7 @@ hyperparameter sweeps in AutoResearch):
 
 ### One-time human setup
 - [ ] Download sdsandbox binary from [gym-donkeycar releases](https://github.com/tawnkramer/gym-donkeycar/releases)
-- [ ] `pip install gym-donkeycar` and verify connection (Section 5.4)
+- [ ] `uv sync` and verify gym-donkeycar connection (Section 5.4)
 - [ ] Start sdsandbox headless server: `~/donkey_sim/donkey_sim.x86_64 --headless --port 9091 &`
 - [ ] Run `python prepare_donkey.py --generate` to produce the training tub (~20 k frames)
 

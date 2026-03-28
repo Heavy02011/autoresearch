@@ -36,7 +36,7 @@ Complete guide for setting up and running the autonomous pretraining research lo
 
 ## Python Environment
 
-### Option A — uv (recommended, fastest)
+### Install via uv (required)
 
 ```bash
 # Install uv
@@ -46,16 +46,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv venv --python 3.10
 source .venv/bin/activate
 
-# Install all dependencies
+# Install all dependencies (locked + hash-verified)
 uv sync
-```
-
-### Option B — pip
-
-```bash
-python3.10 -m venv .venv
-source .venv/bin/activate
-pip install -e .
 ```
 
 ### Verify Installation
@@ -365,7 +357,7 @@ tail -f logs/autoresearch.log | jq '{time: .timestamp, event: .event, iter: .ite
 ```bash
 # Make sure the venv is active and the package is installed
 source .venv/bin/activate
-pip install -e .
+uv sync
 ```
 
 ### `CUDA out of memory`

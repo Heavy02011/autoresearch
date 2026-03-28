@@ -234,8 +234,7 @@ promotion:
 ### 1. Install
 ```bash
 cd /workspaces/autoresearch
-pip install -e .  # Editable install
-pip install -r requirements-dev.txt  # (Optional) for dev tools
+uv sync   # Locked + hash-verified install
 ```
 
 ### 2. Run autonomous loop (dry-run)

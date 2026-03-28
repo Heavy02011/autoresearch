@@ -144,7 +144,7 @@ autoresearch run --max-iterations 5
 ### Software
 - ✅ PyTorch 2.9.1 (already in pyproject.toml)
 - ✅ numpy (for metric aggregation)
-- ✅ gym-donkeycar 22.11.6 (install: `pip install gym-donkeycar==22.11.6`)
+- ✅ gym-donkeycar 22.11.6 (declared in `pyproject.toml`, install: `uv sync`)
 
 ### Environment
 - Simulator executable at one of:

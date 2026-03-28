@@ -17,7 +17,7 @@ The modular **DonkeyCar steering optimization framework** is fully implemented w
 ### 1. Install Dependencies
 ```bash
 cd /workspaces/autoresearch
-pip install pydantic typer omegaconf structlog wandb
+uv sync
 ```
 
 ### 2. Run Dry-Run Test

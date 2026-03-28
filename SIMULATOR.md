@@ -78,9 +78,9 @@ port: 9091
 
 ### Environment Setup
 
-1. **Install gym-donkeycar:**
+1. **Install gym-donkeycar** (included in `pyproject.toml`):
    ```bash
-   pip install gym-donkeycar==22.11.6
+   uv sync
    ```
 
 2. **Donkey Simulator:**

@@ -24,14 +24,10 @@ For macOS or Windows, download the corresponding archive from the releases page 
 
 ## 2. Install gym-donkeycar Python package
 
-```bash
-pip install git+https://github.com/tawnkramer/gym-donkeycar
-```
-
-Or install a specific version:
+gym-donkeycar is declared in `pyproject.toml`. Install all dependencies via uv:
 
 ```bash
-pip install gym-donkeycar==22.11.6   # replace with current release
+uv sync
 ```
 
 ---

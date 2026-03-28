@@ -108,7 +108,6 @@ This repo includes a complete implementation of the autoresearch loop for the [D
 **Step 1 — Install:**
 ```bash
 uv sync
-# or: pip install -e .
 ```
 
 **Step 2 — Validate environment (no GPU/simulator needed):**

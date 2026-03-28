@@ -34,8 +34,19 @@ dependencies = [
     "structlog>=23.3.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
 [project.scripts]
 autoresearch = "autoresearch.cli:main"
+
+[tool.uv]
+# Supply-chain hardening: only resolve packages published at least 9 days ago.
+# Update this date periodically (run: date -u -d '9 days ago' +%Y-%m-%dT00:00:00Z).
+exclude-newer = "2026-03-19T00:00:00Z"
 
 [tool.uv.sources]
 torch = [

@@ -2,27 +2,26 @@ FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
 
 WORKDIR /autoresearch
 
-# System dependencies
+# System dependencies (no python3-pip — we use uv exclusively)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3.10-venv \
-    python3-pip \
     git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv for fast dependency installation
-RUN pip install uv
+# Install uv via official installer (not pip)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
 # Copy dependency files first (layer caching)
 COPY pyproject.toml ./
 COPY uv.lock* ./
 
-# Install Python dependencies
+# Install Python dependencies (locked, hash-verified via uv.lock)
 RUN uv venv /opt/venv --python python3.10 && \
     . /opt/venv/bin/activate && \
-    uv sync --no-dev --index-url https://pypi.org/simple \
-    || pip install --no-cache-dir pydantic typer structlog omegaconf wandb onnx onnxruntime
+    uv sync --no-dev
 
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"

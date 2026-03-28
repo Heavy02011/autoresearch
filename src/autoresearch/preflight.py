@@ -71,7 +71,7 @@ def check_required_packages(result: PreflightResult) -> None:
             importlib.import_module(pkg)
             result.ok(f"{pkg} importable")
         except ImportError:
-            result.error(f"Required package not found: {pkg}. Run: pip install -e .")
+            result.error(f"Required package not found: {pkg}. Run: uv sync")
 
 
 def check_optional_packages(result: PreflightResult) -> None:
